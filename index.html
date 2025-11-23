@@ -189,12 +189,15 @@
         </div>
         
         <!-- Przyciski kontrolne -->
-        <div class="flex justify-center gap-4 mb-8">
+        <div class="flex justify-center gap-4 mb-8 flex-wrap">
             <button id="startBtn" class="cosmic-button px-8 py-3 rounded-lg font-bold text-white uppercase tracking-wide">
                 🚀 Rozpocznij pobieranie
             </button>
             <button id="stopBtn" class="cosmic-button px-8 py-3 rounded-lg font-bold text-white uppercase tracking-wide" disabled>
                 ⏸ Zatrzymaj
+            </button>
+            <button id="openFolderBtn" class="cosmic-button px-6 py-3 rounded-lg font-bold text-white uppercase tracking-wide">
+                📁 Otwórz folder
             </button>
         </div>
 
@@ -212,6 +215,18 @@
             </div>
             
             <p id="statusText" class="text-blue-200 font-medium">Gotowy do rozpoczęcia</p>
+            <div class="mt-4 pt-4 border-t border-purple-800/50">
+                <div class="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                        <span class="text-purple-400">Pobrano:</span>
+                        <span id="downloadedCount" class="text-green-400 font-bold ml-2">0</span>
+                    </div>
+                    <div>
+                        <span class="text-purple-400">Pozostało:</span>
+                        <span id="remainingCount" class="text-yellow-400 font-bold ml-2">0</span>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Log -->

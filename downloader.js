@@ -728,18 +728,27 @@ async function startDownload(mainWindow) {
     const months = await parseCalendar();
     sendLog(mainWindow, `Znaleziono ${months.length} miesięcy`, 'info');
 
-    // Zliczanie wszystkich dni - tylko jeśli nie było wcześniej zliczone
-    if (!currentProgress.isCountingComplete || currentProgress.total === 0) {
+    // Zliczanie wszystkich dni - zawsze przeliczamy, żeby wykryć nowe dni
+    // (np. gdy pojawi się nowe zdjęcie jutro)
+    const wasCountingComplete = currentProgress.isCountingComplete;
+    const oldTotal = currentProgress.total;
+    
+    if (!wasCountingComplete || currentProgress.total === 0) {
       sendLog(mainWindow, 'Zliczanie dni do pobrania...', 'info');
-      let totalDays = 0;
-      const totalMonths = months.length;
-      for (let i = 0; i < months.length; i++) {
-        if (shouldStop) break;
-        const month = months[i];
-        const days = await parseMonth(month.url);
-        totalDays += days.length;
-        
-        // Aktualizacja postępu zliczania
+    } else {
+      sendLog(mainWindow, 'Sprawdzanie nowych dni w kalendarzu...', 'info');
+    }
+    
+    let totalDays = 0;
+    const totalMonths = months.length;
+    for (let i = 0; i < months.length; i++) {
+      if (shouldStop) break;
+      const month = months[i];
+      const days = await parseMonth(month.url);
+      totalDays += days.length;
+      
+      // Aktualizacja postępu zliczania (tylko jeśli pierwsze zliczanie)
+      if (!wasCountingComplete || currentProgress.total === 0) {
         const countingPercent = ((i + 1) / totalMonths) * 100;
         currentProgress.percent = countingPercent;
         currentProgress.status = `Zliczanie: ${i + 1}/${totalMonths} miesięcy (${totalDays} dni)`;
@@ -751,13 +760,20 @@ async function startDownload(mainWindow) {
           await saveProgress();
         }
       }
-      currentProgress.total = totalDays;
-      currentProgress.isCountingComplete = true;
-      await saveProgress(); // Zapisz ukończone zliczanie
+    }
+    
+    currentProgress.total = totalDays;
+    currentProgress.isCountingComplete = true;
+    await saveProgress();
+    
+    // Informuj o nowych dniach
+    if (wasCountingComplete && oldTotal > 0 && totalDays > oldTotal) {
+      const newDays = totalDays - oldTotal;
+      sendLog(mainWindow, `✓ Znaleziono ${newDays} nowych dni! Łącznie: ${totalDays} zdjęć`, 'success');
+    } else if (!wasCountingComplete || currentProgress.total === 0) {
       sendLog(mainWindow, `Łącznie do pobrania: ${totalDays} zdjęć`, 'info');
     } else {
-      // Użyj zapamiętanej wartości
-      sendLog(mainWindow, `Używam zapamiętanej liczby: ${currentProgress.total} zdjęć`, 'info');
+      sendLog(mainWindow, `Kalendarz zaktualizowany. Łącznie: ${totalDays} zdjęć`, 'info');
     }
     
     // Reset postępu przed rozpoczęciem pobierania (ale zachowaj total)
@@ -883,9 +899,31 @@ function sendLog(mainWindow, message, logType = 'info') {
   console.log(`[${logType.toUpperCase()}] ${message}`);
 }
 
+async function resetProgress() {
+  try {
+    // Resetuj postęp w pamięci
+    currentProgress.downloaded = 0;
+    currentProgress.total = 0;
+    currentProgress.downloadedDays = new Set();
+    currentProgress.isCountingComplete = false;
+    currentProgress.percent = 0;
+    currentProgress.status = 'Gotowy';
+    
+    // Usuń plik postępu
+    if (await fs.pathExists(PROGRESS_FILE)) {
+      await fs.remove(PROGRESS_FILE);
+    }
+    
+    return { success: true, message: 'Postęp został zresetowany' };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+}
+
 module.exports = {
   startDownload,
   stopDownload,
-  getProgress
+  getProgress,
+  resetProgress
 };
 

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 
 // Polyfill dla Web API w Electron (przed załadowaniem innych modułów)
@@ -74,6 +74,12 @@ ipcMain.handle('stop-download', async () => {
 
 ipcMain.handle('get-progress', async () => {
   return await downloader.getProgress();
+});
+
+ipcMain.handle('open-downloads-folder', async () => {
+  const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+  await shell.openPath(DOWNLOAD_DIR);
+  return { success: true };
 });
 
 // Nasłuchiwanie na logi z downloadera

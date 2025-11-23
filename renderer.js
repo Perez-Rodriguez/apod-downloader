@@ -2,10 +2,13 @@ const { ipcRenderer } = require('electron');
 
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
+const openFolderBtn = document.getElementById('openFolderBtn');
 const statusText = document.getElementById('statusText');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const log = document.getElementById('log');
+const downloadedCount = document.getElementById('downloadedCount');
+const remainingCount = document.getElementById('remainingCount');
 
 function addLog(message, type = 'info') {
   const entry = document.createElement('div');
@@ -37,6 +40,22 @@ function updateProgress(percent, text) {
   if (text) {
     statusText.textContent = text;
   }
+  
+  // Aktualizuj statystyki
+  updateStats();
+}
+
+async function updateStats() {
+  try {
+    const progress = await ipcRenderer.invoke('get-progress');
+    if (progress) {
+      downloadedCount.textContent = progress.downloaded || 0;
+      const remaining = (progress.total || 0) - (progress.downloaded || 0);
+      remainingCount.textContent = remaining > 0 ? remaining : 0;
+    }
+  } catch (error) {
+    // Ignoruj błędy
+  }
 }
 
 startBtn.addEventListener('click', async () => {
@@ -64,6 +83,15 @@ stopBtn.addEventListener('click', async () => {
   }
 });
 
+openFolderBtn.addEventListener('click', async () => {
+  try {
+    await ipcRenderer.invoke('open-downloads-folder');
+    addLog('Otworzono folder downloads', 'info');
+  } catch (error) {
+    addLog(`Błąd przy otwieraniu folderu: ${error.message}`, 'error');
+  }
+});
+
 // Nasłuchiwanie na aktualizacje postępu
 setInterval(async () => {
   try {
@@ -87,4 +115,5 @@ ipcRenderer.on('progress-update', (event, data) => {
 });
 
 addLog('Aplikacja gotowa', 'info');
+updateStats(); // Załaduj statystyki przy starcie
 
