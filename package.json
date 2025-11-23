@@ -1,6 +1,6 @@
 {
   "name": "apod-downloader",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "An app to download NASA APOD images in the highest resolution",
   "main": "main.js",
   "scripts": {
@@ -36,7 +36,6 @@
     },
     "files": [
       "**/*",
-      "!node_modules/**/*",
       "!dist",
       "!*.md",
       "!.git",
