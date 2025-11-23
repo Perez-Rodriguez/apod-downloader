@@ -10,6 +10,11 @@ const CALENDAR_URL = 'https://apod.nasa.gov/apod/calendar/allyears.html';
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const PROGRESS_FILE = path.join(__dirname, 'progress.json');
 
+// Formaty obrazów do pobierania
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'svg', 'ico', 'heic', 'heif'];
+// Formaty wideo do pomijania
+const VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm', 'avi', 'mkv', 'flv', 'wmv', 'm4v', '3gp'];
+
 let isDownloading = false;
 let shouldStop = false;
 let currentProgress = {
@@ -23,7 +28,26 @@ let currentProgress = {
 
 // Inicjalizacja katalogów
 async function initialize() {
+  // Sprawdź czy folder downloads istnieje
+  const downloadsExists = await fs.pathExists(DOWNLOAD_DIR);
+  
+  // Jeśli folder został usunięty, resetuj postęp
+  if (!downloadsExists) {
+    // Usuń progress.json jeśli istnieje
+    if (await fs.pathExists(PROGRESS_FILE)) {
+      await fs.remove(PROGRESS_FILE);
+    }
+    // Resetuj postęp w pamięci
+    currentProgress.downloaded = 0;
+    currentProgress.total = 0;
+    currentProgress.downloadedDays = new Set();
+    currentProgress.isCountingComplete = false;
+  }
+  
+  // Utwórz folder downloads
   await fs.ensureDir(DOWNLOAD_DIR);
+  
+  // Załaduj postęp (lub zacznij od zera jeśli folder był usunięty)
   await loadProgress();
 }
 
@@ -248,107 +272,187 @@ async function parseMonth(monthUrl) {
 }
 
 // Parsowanie strony dnia - znalezienie linku do zdjęcia w pełnej rozdzielczości
-async function parseDay(dayUrl) {
+async function parseDay(dayUrl, mainWindow = null) {
   try {
+    // KROK 1: Pobierz stronę dnia
     const html = await fetchHTML(dayUrl);
     const $ = cheerio.load(html);
+    
+    // Debug: policz obrazy
+    const imgCount = $('img').length;
+    if (mainWindow) {
+      sendLog(mainWindow, `Debug: Znaleziono ${imgCount} obrazów na stronie`, 'info');
+    }
   
-  let imageUrl = null;
-  let candidateUrls = [];
+  let imageLinkUrl = null; // Link do kliknięcia (strona z pełną rozdzielczością)
   let foundVideo = false;
-  let foundGif = false;
   let videoType = '';
   
-  // Metoda 1: Szukamy głównego obrazu <img> i sprawdzamy czy jest w linku <a> (najczęstszy przypadek)
-  // Szukamy największego obrazu na stronie (główny obraz APOD)
+  // KROK 2: Znajdź główny obraz (ten w czerwonej obramówce) i link <a> który go otacza
+  // Szukamy wszystkich obrazów na stronie - główny obraz APOD jest zwykle największy
+  let allImages = [];
+  
   $('img').each((i, elem) => {
     const $img = $(elem);
     const width = parseInt($img.attr('width')) || 0;
     const height = parseInt($img.attr('height')) || 0;
     const size = width * height;
-    const src = $img.attr('src');
+    const src = $img.attr('src') || '';
+    const alt = $img.attr('alt') || '';
     
-    // Szukamy obrazów - zmniejszamy wymagania, żeby znaleźć główny obraz
-    // Główny obraz APOD jest zwykle duży, ale może nie mieć atrybutów width/height
-    if (size > 10000 || width > 200 || height > 200 || (src && src.includes('/image/'))) {
-      const $parentLink = $img.closest('a');
-      
-      if ($parentLink.length > 0) {
-        const href = $parentLink.attr('href');
-        if (href) {
-          const lowerHref = href.toLowerCase();
-          // Sprawdzamy czy to film lub gif
-          if (lowerHref.match(/\.(mp4|mov|webm)$/)) {
-            foundVideo = true;
-            videoType = href.match(/\.(\w+)$/)?.[1] || 'video';
-          } else if (lowerHref.match(/\.gif$/)) {
-            foundGif = true;
-          } else if (!lowerHref.match(/\.(mp4|mov|webm|gif)$/)) {
-            // Sprawdzamy czy link zawiera /image/ lub prowadzi do obrazu
-            // Ważne: link może nie mieć rozszerzenia, ale prowadzić do /image/
-            if (href.includes('/image/') || lowerHref.match(/\.(jpg|jpeg|png)$/)) {
-              let url = href;
-              if (!url.startsWith('http')) {
-                if (url.startsWith('/')) {
-                  url = `https://apod.nasa.gov${url}`;
-                } else if (url.startsWith('image/')) {
-                  url = `https://apod.nasa.gov/apod/${url}`;
-                } else if (url.startsWith('../')) {
-                  // Obsługa relatywnych linków
-                  url = url.replace('../', '');
-                  url = `${BASE_URL}/${url}`;
-                } else {
-                  url = `${BASE_URL}/${url}`;
-                }
-              }
-              candidateUrls.push({ url, size, priority: 1 });
+    // Zbieramy wszystkie obrazy (nie filtrujemy od razu)
+    allImages.push({
+      $img,
+      width,
+      height,
+      size,
+      src,
+      alt,
+      index: i
+    });
+  });
+  
+  // Sortuj obrazy po rozmiarze (największy = główny)
+  allImages.sort((a, b) => {
+    // Priorytet dla obrazów z /image/ w src
+    if (a.src.includes('/image/') && !b.src.includes('/image/')) return -1;
+    if (!a.src.includes('/image/') && b.src.includes('/image/')) return 1;
+    // Potem po rozmiarze
+    return b.size - a.size;
+  });
+  
+  // Przetwarzaj obrazy od największego
+  for (const imgInfo of allImages) {
+    const { $img, src, width, height, size } = imgInfo;
+    
+    if (mainWindow) {
+      sendLog(mainWindow, `Debug: Sprawdzam obraz: src="${src}", size=${size}, w=${width}x${height}`, 'info');
+    }
+    
+    // Sprawdź czy obraz ma link rodzica <a>
+    const $parentLink = $img.closest('a');
+    
+    if ($parentLink.length > 0) {
+      const href = $parentLink.attr('href');
+      if (mainWindow) {
+        sendLog(mainWindow, `Debug: Obraz ma link <a>: href="${href}"`, 'info');
+      }
+      if (href) {
+        const lowerHref = href.toLowerCase();
+        const ext = href.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+        
+        // Sprawdzamy czy to film
+        if (ext && VIDEO_EXTENSIONS.includes(ext)) {
+          foundVideo = true;
+          videoType = ext;
+          if (mainWindow) {
+            sendLog(mainWindow, `Debug: To jest film (${ext}), pomijam`, 'info');
+          }
+          continue; // Przejdź do następnego obrazu
+        }
+        
+        // To jest link do kliknięcia - akceptujemy wszystkie formaty obrazów i linki bez rozszerzenia
+        // Ważne: główny obraz APOD jest zwykle w linku <a>, który prowadzi do pełnej rozdzielczości
+        const isImageExt = ext && IMAGE_EXTENSIONS.includes(ext);
+        if (href.includes('/image/') || isImageExt || !ext || src.includes('/image/')) {
+          let url = href;
+          if (!url.startsWith('http')) {
+            if (url.startsWith('/')) {
+              url = `https://apod.nasa.gov${url}`;
+            } else if (url.startsWith('image/')) {
+              url = `https://apod.nasa.gov/apod/${url}`;
+            } else if (url.startsWith('../')) {
+              url = url.replace('../', '');
+              url = `${BASE_URL}/${url}`;
+            } else {
+              // Relatywny link - buduj względem strony dnia
+              const baseUrl = dayUrl.substring(0, dayUrl.lastIndexOf('/'));
+              url = `${baseUrl}/${url}`;
             }
+          }
+          // Znaleźliśmy link - to jest główny obraz (jeden jedyny na stronie)
+          if (mainWindow) {
+            sendLog(mainWindow, `Debug: Znaleziono link do kliknięcia: ${url}`, 'success');
+          }
+          imageLinkUrl = url;
+          break; // Znaleźliśmy główny obraz, nie szukamy dalej
+        } else {
+          if (mainWindow) {
+            sendLog(mainWindow, `Debug: Link nie pasuje do obrazu (ext=${ext}, isImageExt=${isImageExt})`, 'info');
           }
         }
       }
-      
-      // Sprawdzamy też bezpośrednio src obrazu
-      const src = $img.attr('src');
-      if (src) {
-        const lowerSrc = src.toLowerCase();
-        if (lowerSrc.match(/\.(mp4|mov|webm)$/)) {
-          foundVideo = true;
-          videoType = src.match(/\.(\w+)$/)?.[1] || 'video';
-        } else if (lowerSrc.match(/\.gif$/)) {
-          foundGif = true;
-        } else if (src.includes('/image/') || src.match(/\.(jpg|jpeg|png)$/i)) {
-          if (!lowerSrc.match(/\.(mp4|mov|webm|gif)$/)) {
-            let url = src;
-            if (!url.startsWith('http')) {
-              if (url.startsWith('/')) {
-                url = `https://apod.nasa.gov${url}`;
-              } else if (url.startsWith('image/')) {
-                url = `https://apod.nasa.gov/apod/${url}`;
-              } else {
-                url = `${BASE_URL}/${url}`;
-              }
-            }
-            candidateUrls.push({ url, size, priority: 2 });
+    } else {
+      if (mainWindow) {
+        sendLog(mainWindow, `Debug: Obraz NIE ma linku <a> otaczającego`, 'info');
+      }
+    }
+    
+    // Jeśli obraz nie ma linku, ale ma /image/ w src, może być bezpośrednio do pobrania
+    if (!imageLinkUrl && src && src.includes('/image/')) {
+      const srcExt = src.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+      if (!srcExt || !VIDEO_EXTENSIONS.includes(srcExt)) {
+        let url = src;
+        if (!url.startsWith('http')) {
+          if (url.startsWith('/')) {
+            url = `https://apod.nasa.gov${url}`;
+          } else if (url.startsWith('image/')) {
+            url = `https://apod.nasa.gov/apod/${url}`;
+          } else {
+            const baseUrl = dayUrl.substring(0, dayUrl.lastIndexOf('/'));
+            url = `${baseUrl}/${url}`;
           }
+        }
+        imageLinkUrl = url;
+        break;
+      }
+    }
+  }
+  
+  // Jeśli nadal nie znaleźliśmy, spróbuj znaleźć pierwszy obraz bez względu na rozmiar
+  // (może nie mieć atrybutów width/height)
+  if (!imageLinkUrl && allImages.length > 0) {
+    const firstImg = allImages[0];
+    const $img = firstImg.$img;
+    const $parentLink = $img.closest('a');
+    
+    if ($parentLink.length > 0) {
+      const href = $parentLink.attr('href');
+      if (href) {
+        const ext = href.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+        // Pomijamy tylko filmy
+        if (!ext || !VIDEO_EXTENSIONS.includes(ext)) {
+          let url = href;
+          if (!url.startsWith('http')) {
+            if (url.startsWith('/')) {
+              url = `https://apod.nasa.gov${url}`;
+            } else if (url.startsWith('image/')) {
+              url = `https://apod.nasa.gov/apod/${url}`;
+            } else if (url.startsWith('../')) {
+              url = url.replace('../', '');
+              url = `${BASE_URL}/${url}`;
+            } else {
+              const baseUrl = dayUrl.substring(0, dayUrl.lastIndexOf('/'));
+              url = `${baseUrl}/${url}`;
+            }
+          }
+          imageLinkUrl = url;
         }
       }
     }
-  });
+  }
 
-  // Metoda 2: Szukamy wszystkich linków <a> które prowadzą do /image/
-  $('a').each((i, elem) => {
-    const href = $(elem).attr('href');
-    if (href && href.includes('/image/')) {
-      const lowerHref = href.toLowerCase();
-      // Sprawdzamy czy to film lub gif
-      if (lowerHref.match(/\.(mp4|mov|webm)$/)) {
-        foundVideo = true;
-        videoType = href.match(/\.(\w+)$/)?.[1] || 'video';
-      } else if (lowerHref.match(/\.gif$/)) {
-        foundGif = true;
-      } else if (!lowerHref.match(/\.(mp4|mov|webm|gif)$/)) {
-        // Sprawdzamy czy link zawiera rozszerzenie obrazu
-        if (lowerHref.match(/\.(jpg|jpeg|png)$/)) {
+  // Jeśli nie znaleźliśmy przez obraz, szukamy bezpośrednio linków <a> do /image/
+  if (!imageLinkUrl) {
+    $('a').each((i, elem) => {
+      const href = $(elem).attr('href');
+      if (href && href.includes('/image/')) {
+        const lowerHref = href.toLowerCase();
+        const ext = href.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+        if (ext && VIDEO_EXTENSIONS.includes(ext)) {
+          foundVideo = true;
+          videoType = ext;
+        } else {
           let url = href;
           if (!url.startsWith('http')) {
             if (url.startsWith('/')) {
@@ -356,65 +460,99 @@ async function parseDay(dayUrl) {
             } else if (url.startsWith('image/')) {
               url = `https://apod.nasa.gov/apod/${url}`;
             } else {
-              url = `${BASE_URL}/${url}`;
+              const baseUrl = dayUrl.substring(0, dayUrl.lastIndexOf('/'));
+              url = `${baseUrl}/${url}`;
             }
           }
-          candidateUrls.push({ url, size: 0, priority: 0 });
+          imageLinkUrl = url;
+          return false; // break
         }
-      }
-    }
-  });
-
-  // Metoda 3: Szukamy w tekście strony - czasami link jest w opisie
-  const pageText = html;
-  const imageMatches = pageText.match(/https?:\/\/apod\.nasa\.gov\/apod\/image\/[^\s\)"']+\.(jpg|jpeg|png|gif|mp4|mov|webm)/gi);
-  if (imageMatches && imageMatches.length > 0) {
-    imageMatches.forEach(match => {
-      const lowerMatch = match.toLowerCase();
-      if (lowerMatch.match(/\.(mp4|mov|webm)$/)) {
-        foundVideo = true;
-        videoType = match.match(/\.(\w+)$/)?.[1] || 'video';
-      } else if (lowerMatch.match(/\.gif$/)) {
-        foundGif = true;
-      } else if (!lowerMatch.match(/\.(mp4|mov|webm|gif)$/)) {
-        candidateUrls.push({ url: match, size: 0, priority: 3 });
       }
     });
   }
   
-  // Zwracamy informację o znalezionym video/gif
-  if (foundVideo || foundGif) {
-    return { imageUrl: null, skipReason: foundGif ? 'GIF' : `Video (${videoType})` };
+  // Zwracamy informację o znalezionym video
+  if (foundVideo) {
+    return { imageUrl: null, skipReason: `Video (${videoType})` };
   }
 
-  // Wybieramy najlepszy kandydat (największy obraz lub najdłuższy URL - zwykle pełna rozdzielczość)
-  if (candidateUrls.length > 0) {
-    // Sortujemy: najpierw po priorytecie, potem po rozmiarze, potem po długości URL
-    candidateUrls.sort((a, b) => {
-      if (a.priority !== b.priority) return a.priority - b.priority;
-      if (a.size !== b.size) return b.size - a.size; // większy = lepszy
-      return b.url.length - a.url.length; // dłuższy URL = zwykle pełna rozdzielczość
+  // KROK 3: Jeśli znaleźliśmy link, kliknij w niego (pobierz stronę z pełną rozdzielczością)
+  if (imageLinkUrl) {
+    // Czekamy chwilę przed kliknięciem
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Pobierz stronę z pełną rozdzielczością
+    const fullResHtml = await fetchHTML(imageLinkUrl);
+    const $fullRes = cheerio.load(fullResHtml);
+    
+    // KROK 4: Znajdź obraz w pełnej rozdzielczości na nowej stronie
+    let imageUrl = null;
+    
+    // Szukamy obrazu <img> na stronie z pełną rozdzielczością
+    $fullRes('img').each((i, elem) => {
+      const $img = $fullRes(elem);
+      const src = $img.attr('src');
+      const srcExt = src.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+      const isImageSrc = srcExt && IMAGE_EXTENSIONS.includes(srcExt);
+      if (src && (src.includes('/image/') || isImageSrc)) {
+        const lowerSrc = src.toLowerCase();
+        if (!srcExt || !VIDEO_EXTENSIONS.includes(srcExt)) {
+          let url = src;
+          if (!url.startsWith('http')) {
+            if (url.startsWith('/')) {
+              url = `https://apod.nasa.gov${url}`;
+            } else if (url.startsWith('image/')) {
+              url = `https://apod.nasa.gov/apod/${url}`;
+            } else {
+              const baseUrl = imageLinkUrl.substring(0, imageLinkUrl.lastIndexOf('/'));
+              url = `${baseUrl}/${url}`;
+            }
+          }
+          // Bierzemy największy obraz (zwykle to jest pełna rozdzielczość)
+          if (!imageUrl || url.length > imageUrl.length) {
+            imageUrl = url;
+          }
+        }
+      }
     });
-    imageUrl = candidateUrls[0].url;
-  }
-
-  // Jeśli znaleźliśmy obraz, czekamy 20 sekund na renderowanie pełnej rozdzielczości
-  if (imageUrl) {
-    // Normalizujemy URL na końcu
-    if (!imageUrl.startsWith('http')) {
-      if (imageUrl.startsWith('/')) {
-        imageUrl = `https://apod.nasa.gov${imageUrl}`;
-      } else if (imageUrl.startsWith('image/')) {
-        imageUrl = `https://apod.nasa.gov/apod/${imageUrl}`;
-      } else {
-        imageUrl = `${BASE_URL}/${imageUrl}`;
+    
+    // Jeśli nie znaleźliśmy przez <img>, szukamy w tekście strony
+    if (!imageUrl) {
+      const pageText = fullResHtml;
+      // Szukamy wszystkich formatów obrazów
+      const imageExtPattern = IMAGE_EXTENSIONS.join('|');
+      const imageMatches = pageText.match(new RegExp(`https?://apod\\.nasa\\.gov/apod/image/[^\\s\\)"']+\\.(${imageExtPattern})`, 'gi'));
+      if (imageMatches && imageMatches.length > 0) {
+        // Bierzemy najdłuższy URL (zwykle to jest pełna rozdzielczość)
+        imageUrl = imageMatches.sort((a, b) => b.length - a.length)[0];
       }
     }
     
-    // Czekamy 20 sekund na renderowanie pełnej rozdzielczości
-    await new Promise(resolve => setTimeout(resolve, 20000));
-    
-    return { imageUrl, skipReason: null };
+    // Jeśli nadal nie znaleźliśmy, może link prowadzi bezpośrednio do obrazu
+    if (!imageUrl) {
+      const lowerLink = imageLinkUrl.toLowerCase();
+      const linkExt = imageLinkUrl.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+      if (linkExt && IMAGE_EXTENSIONS.includes(linkExt)) {
+        imageUrl = imageLinkUrl;
+      }
+    }
+
+    if (imageUrl) {
+      // Normalizujemy URL
+      if (!imageUrl.startsWith('http')) {
+        if (imageUrl.startsWith('/')) {
+          imageUrl = `https://apod.nasa.gov${imageUrl}`;
+        } else if (imageUrl.startsWith('image/')) {
+          imageUrl = `https://apod.nasa.gov/apod/${imageUrl}`;
+        } else {
+          imageUrl = `${BASE_URL}/${imageUrl}`;
+        }
+      }
+      
+      // Inteligentne czekanie na renderowanie - sprawdzamy czy obraz jest gotowy
+      // Zamiast czekać stałe 30 sekund, sprawdzamy czy rozmiar się stabilizuje
+      return { imageUrl, skipReason: null, needsRendering: true };
+    }
   }
 
   return { imageUrl: null, skipReason: 'Nie znaleziono obrazu na stronie' };
@@ -425,6 +563,119 @@ async function parseDay(dayUrl) {
     }
     throw error;
   }
+}
+
+// Sprawdzanie czy obraz jest w pełni zrenderowany
+async function checkImageReady(imageUrl, maxWaitTime = 120000, mainWindow = null) {
+  const startTime = Date.now();
+  let lastSize = 0;
+  let stableCount = 0;
+  const requiredStableChecks = 3; // Ile razy rozmiar musi być taki sam
+  let checkCount = 0;
+  
+  while (Date.now() - startTime < maxWaitTime) {
+    try {
+      checkCount++;
+      const size = await getImageSize(imageUrl);
+      
+      if (size > 0) {
+        if (size === lastSize && lastSize > 0) {
+          stableCount++;
+          if (mainWindow) {
+            sendLog(mainWindow, `Sprawdzanie renderowania (${checkCount}): rozmiar stabilny (${(size/1024/1024).toFixed(2)} MB)`, 'info');
+          }
+          if (stableCount >= requiredStableChecks) {
+            // Rozmiar jest stabilny - obraz jest gotowy
+            if (mainWindow) {
+              sendLog(mainWindow, `Obraz w pełni zrenderowany (${(size/1024/1024).toFixed(2)} MB)`, 'success');
+            }
+            return true;
+          }
+        } else if (size > lastSize) {
+          // Rozmiar się zwiększył - obraz się jeszcze renderuje
+          stableCount = 0;
+          lastSize = size;
+          if (mainWindow) {
+            sendLog(mainWindow, `Sprawdzanie renderowania (${checkCount}): rozmiar rośnie (${(size/1024/1024).toFixed(2)} MB) - czekam...`, 'info');
+          }
+        } else if (lastSize === 0) {
+          // Pierwsze sprawdzenie
+          lastSize = size;
+          if (mainWindow && size > 0) {
+            sendLog(mainWindow, `Sprawdzanie renderowania (${checkCount}): rozmiar ${(size/1024/1024).toFixed(2)} MB`, 'info');
+          }
+        }
+      } else {
+        // Nieznany rozmiar - czekamy chwilę i próbujemy ponownie
+        if (mainWindow) {
+          sendLog(mainWindow, `Sprawdzanie renderowania (${checkCount}): czekam na dostępność...`, 'info');
+        }
+      }
+      
+      // Czekaj 3 sekundy przed następnym sprawdzeniem
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } catch (error) {
+      // Jeśli błąd, czekaj chwilę i spróbuj ponownie
+      if (mainWindow) {
+        sendLog(mainWindow, `Sprawdzanie renderowania: błąd, ponawiam...`, 'info');
+      }
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+  }
+  
+  // Jeśli przekroczono czas, zakładamy że obraz jest gotowy
+  if (mainWindow) {
+    sendLog(mainWindow, `Przekroczono maksymalny czas oczekiwania - pobieram obraz`, 'info');
+  }
+  return true;
+}
+
+// Pobieranie rozmiaru obrazu przez HEAD request
+async function getImageSize(imageUrl) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(imageUrl);
+    const protocol = urlObj.protocol === 'https:' ? https : http;
+    
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+      path: urlObj.pathname + urlObj.search,
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 10000
+    };
+
+    const req = protocol.request(options, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        // Przekierowanie - spróbuj ponownie z nowym URL
+        return getImageSize(res.headers.location)
+          .then(resolve)
+          .catch(reject);
+      }
+      
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+
+      const contentLength = res.headers['content-length'];
+      if (contentLength) {
+        resolve(parseInt(contentLength));
+      } else {
+        // Jeśli nie ma Content-Length, sprawdź przez GET (pierwsze bajty)
+        resolve(0); // Nieznany rozmiar
+      }
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Timeout'));
+    });
+
+    req.end();
+  });
 }
 
 // Pobieranie zdjęcia
@@ -538,14 +789,12 @@ async function startDownload(mainWindow) {
         try {
           // Parsowanie strony dnia
           sendLog(mainWindow, `Parsowanie strony: ${dayKey} (${day.url})`, 'info');
-          const result = await parseDay(day.url);
+          const result = await parseDay(day.url, mainWindow);
           
           if (!result || !result.imageUrl) {
             const skipReason = result?.skipReason || 'Nie znaleziono obrazu na stronie';
-            if (skipReason === 'GIF') {
-              sendLog(mainWindow, `⏭ Pomijam ${dayKey} - to GIF, nie JPG`, 'info');
-            } else if (skipReason.startsWith('Video')) {
-              sendLog(mainWindow, `⏭ Pomijam ${dayKey} - to ${skipReason}, nie JPG`, 'info');
+            if (skipReason.startsWith('Video')) {
+              sendLog(mainWindow, `⏭ Pomijam ${dayKey} - to ${skipReason} (pomijamy tylko filmy)`, 'info');
             } else {
               sendLog(mainWindow, `⚠ ${dayKey} - ${skipReason} (możliwy błąd parsowania lub nieobsługiwany format)`, 'info');
             }
@@ -557,6 +806,12 @@ async function startDownload(mainWindow) {
 
           const imageUrl = result.imageUrl;
           sendLog(mainWindow, `Znaleziono zdjęcie: ${imageUrl}`, 'info');
+
+          // Jeśli obraz wymaga renderowania, sprawdź czy jest gotowy
+          if (result.needsRendering) {
+            sendLog(mainWindow, `Czekanie na renderowanie pełnej rozdzielczości...`, 'info');
+            await checkImageReady(imageUrl, 120000, mainWindow); // Max 2 minuty, przekazujemy mainWindow dla logów
+          }
 
           // Tworzenie struktury folderów
           const yearDir = path.join(DOWNLOAD_DIR, day.year.toString());
