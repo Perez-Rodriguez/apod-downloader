@@ -1,0 +1,26 @@
+{
+  "name": "apod-downloader",
+  "version": "0.0.1",
+  "description": "Aplikacja do pobierania zdjęć z APOD NASA w najwyższej rozdzielczości",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-setuid-sandbox",
+    "dev": "electron . --dev --no-sandbox --disable-setuid-sandbox"
+  },
+  "keywords": [
+    "electron",
+    "apod",
+    "nasa",
+    "downloader"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "1.0.0-rc.12",
+    "fs-extra": "11.1.1"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "tailwindcss": "^4.1.17"
+  }
+}
