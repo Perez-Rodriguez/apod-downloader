@@ -49,7 +49,13 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow);
+// Ustaw ścieżki dla downloadera używając userData (działa w zbudowanej aplikacji)
+// i utwórz okno
+app.whenReady().then(() => {
+  const userDataPath = app.getPath('userData');
+  downloader.setPaths(userDataPath);
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -77,7 +83,8 @@ ipcMain.handle('get-progress', async () => {
 });
 
 ipcMain.handle('open-downloads-folder', async () => {
-  const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+  const userDataPath = app.getPath('userData');
+  const DOWNLOAD_DIR = path.join(userDataPath, 'downloads');
   await shell.openPath(DOWNLOAD_DIR);
   return { success: true };
 });

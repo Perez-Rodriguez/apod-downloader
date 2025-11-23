@@ -7,8 +7,16 @@ const { URL } = require('url');
 
 const BASE_URL = 'https://apod.nasa.gov/apod';
 const CALENDAR_URL = 'https://apod.nasa.gov/apod/calendar/allyears.html';
-const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
-const PROGRESS_FILE = path.join(__dirname, 'progress.json');
+
+// Ścieżki będą ustawiane przez main.js używając app.getPath('userData')
+let DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+let PROGRESS_FILE = path.join(__dirname, 'progress.json');
+
+// Funkcja do ustawiania ścieżek (wywoływana z main.js)
+function setPaths(userDataPath) {
+  DOWNLOAD_DIR = path.join(userDataPath, 'downloads');
+  PROGRESS_FILE = path.join(userDataPath, 'progress.json');
+}
 
 // Formaty obrazów do pobierania
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'svg', 'ico', 'heic', 'heif'];
@@ -919,6 +927,7 @@ async function resetProgress() {
 }
 
 module.exports = {
+  setPaths,
   startDownload,
   stopDownload,
   getProgress,
