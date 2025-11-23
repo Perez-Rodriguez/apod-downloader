@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
+const fs = require('fs-extra');
 
 // Polyfill dla Web API w Electron (przed załadowaniem innych modułów)
 if (typeof global.File === 'undefined') {
@@ -83,10 +84,17 @@ ipcMain.handle('get-progress', async () => {
 });
 
 ipcMain.handle('open-downloads-folder', async () => {
-  const userDataPath = app.getPath('userData');
-  const DOWNLOAD_DIR = path.join(userDataPath, 'downloads');
-  await shell.openPath(DOWNLOAD_DIR);
-  return { success: true };
+  try {
+    const userDataPath = app.getPath('userData');
+    const DOWNLOAD_DIR = path.join(userDataPath, 'downloads');
+    // Upewnij się, że folder istnieje przed otwarciem
+    await fs.ensureDir(DOWNLOAD_DIR);
+    await shell.openPath(DOWNLOAD_DIR);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening downloads folder:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Nasłuchiwanie na logi z downloadera
