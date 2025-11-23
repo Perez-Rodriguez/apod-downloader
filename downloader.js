@@ -288,7 +288,7 @@ async function parseDay(dayUrl, mainWindow = null) {
   let foundVideo = false;
   let videoType = '';
   
-  // KROK 2: Znajdź główny obraz (ten w czerwonej obramówce) i link <a> który go otacza
+  // KROK 2: Znajdź główny obraz i link <a> który go otacza
   // Szukamy wszystkich obrazów na stronie - główny obraz APOD jest zwykle największy
   let allImages = [];
   
@@ -508,7 +508,7 @@ async function parseDay(dayUrl, mainWindow = null) {
               url = `${baseUrl}/${url}`;
             }
           }
-          // Bierzemy największy obraz (zwykle to jest pełna rozdzielczość)
+          // Bierzemy największy obraz
           if (!imageUrl || url.length > imageUrl.length) {
             imageUrl = url;
           }
@@ -523,12 +523,11 @@ async function parseDay(dayUrl, mainWindow = null) {
       const imageExtPattern = IMAGE_EXTENSIONS.join('|');
       const imageMatches = pageText.match(new RegExp(`https?://apod\\.nasa\\.gov/apod/image/[^\\s\\)"']+\\.(${imageExtPattern})`, 'gi'));
       if (imageMatches && imageMatches.length > 0) {
-        // Bierzemy najdłuższy URL (zwykle to jest pełna rozdzielczość)
+        // Bierzemy najdłuższy URL
         imageUrl = imageMatches.sort((a, b) => b.length - a.length)[0];
       }
     }
     
-    // Jeśli nadal nie znaleźliśmy, może link prowadzi bezpośrednio do obrazu
     if (!imageUrl) {
       const lowerLink = imageLinkUrl.toLowerCase();
       const linkExt = imageLinkUrl.match(/\.(\w+)$/)?.[1]?.toLowerCase();
@@ -550,7 +549,6 @@ async function parseDay(dayUrl, mainWindow = null) {
       }
       
       // Inteligentne czekanie na renderowanie - sprawdzamy czy obraz jest gotowy
-      // Zamiast czekać stałe 30 sekund, sprawdzamy czy rozmiar się stabilizuje
       return { imageUrl, skipReason: null, needsRendering: true };
     }
   }
@@ -729,7 +727,7 @@ async function startDownload(mainWindow) {
     sendLog(mainWindow, `Znaleziono ${months.length} miesięcy`, 'info');
 
     // Zliczanie wszystkich dni - zawsze przeliczamy, żeby wykryć nowe dni
-    // (np. gdy pojawi się nowe zdjęcie jutro)
+    // (np. gdy pojawi się nowe zdjęcie kolejnego dnia)
     const wasCountingComplete = currentProgress.isCountingComplete;
     const oldTotal = currentProgress.total;
     

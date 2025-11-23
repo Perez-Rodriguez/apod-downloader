@@ -1,7 +1,7 @@
 {
   "name": "apod-downloader",
   "version": "0.0.1",
-  "description": "Aplikacja do pobierania zdjęć z APOD NASA w najwyższej rozdzielczości",
+  "description": "An app to download NASA APOD images in the highest resolution",
   "main": "main.js",
   "scripts": {
     "start": "electron . --no-sandbox --disable-setuid-sandbox",
