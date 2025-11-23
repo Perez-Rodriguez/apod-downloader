@@ -3,4 +3,8 @@ downloads/
 progress.json
 *.log
 .DS_Store
+dist/
+build/icon.ico
+build/*.png
+!build/README_ICON.md
 
