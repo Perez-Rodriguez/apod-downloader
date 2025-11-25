@@ -10,6 +10,9 @@ const log = document.getElementById('log');
 const downloadedCount = document.getElementById('downloadedCount');
 const remainingCount = document.getElementById('remainingCount');
 
+// Limit logów w UI (zapobieganie problemom z pamięcią)
+const MAX_LOG_ENTRIES = 50; // Maksymalna liczba logów w UI - stare są usuwane
+
 function addLog(message, type = 'info') {
   const entry = document.createElement('div');
   
@@ -31,6 +34,12 @@ function addLog(message, type = 'info') {
   entry.className = `${colorClass} mb-2 py-1 px-2 rounded hover:bg-purple-900/20 transition-colors`;
   entry.innerHTML = `<span class="mr-2">${icon}</span><span class="text-purple-400">[${new Date().toLocaleTimeString()}]</span> ${message}`;
   log.appendChild(entry);
+  
+  // Usuń najstarsze logi jeśli przekroczono limit
+  while (log.children.length > MAX_LOG_ENTRIES) {
+    log.removeChild(log.firstChild);
+  }
+  
   log.scrollTop = log.scrollHeight;
 }
 
@@ -59,6 +68,11 @@ async function updateStats() {
 }
 
 startBtn.addEventListener('click', async () => {
+  // Zapobiegaj wielokrotnemu kliknięciu
+  if (startBtn.disabled) {
+    return;
+  }
+  
   startBtn.disabled = true;
   stopBtn.disabled = false;
   addLog('Rozpoczynam pobieranie...', 'info');
@@ -67,6 +81,16 @@ startBtn.addEventListener('click', async () => {
     await ipcRenderer.invoke('start-download');
   } catch (error) {
     addLog(`Błąd: ${error.message}`, 'error');
+    // Jeśli błąd "Pobieranie już trwa", spróbuj zresetować stan
+    if (error.message.includes('Pobieranie już trwa')) {
+      addLog('Próbuję zresetować stan pobierania...', 'info');
+      try {
+        await ipcRenderer.invoke('reset-download-state');
+        addLog('Stan zresetowany. Spróbuj ponownie.', 'success');
+      } catch (resetError) {
+        addLog(`Błąd przy resetowaniu: ${resetError.message}`, 'error');
+      }
+    }
     startBtn.disabled = false;
     stopBtn.disabled = true;
   }

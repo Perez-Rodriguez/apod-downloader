@@ -25,6 +25,7 @@ const VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm', 'avi', 'mkv', 'flv', 'wmv', 'm4v
 
 let isDownloading = false;
 let shouldStop = false;
+let downloadPromise = null; // Promise dla aktualnego pobierania
 let currentProgress = {
   total: 0,
   downloaded: 0,
@@ -81,23 +82,38 @@ async function loadProgress() {
   }
 }
 
-// Zapisywanie postępu do pliku
-async function saveProgress() {
-  try {
-    await fs.writeJson(PROGRESS_FILE, {
-      downloaded: currentProgress.downloaded,
-      total: currentProgress.total, // Zapisz całkowitą liczbę
-      downloadedDays: Array.from(currentProgress.downloadedDays),
-      isCountingComplete: currentProgress.isCountingComplete || false // Zapisz stan zliczania
-    });
-  } catch (error) {
-    console.error('Błąd przy zapisywaniu postępu:', error);
+// Zapisywanie postępu do pliku z retry
+async function saveProgress(retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await fs.writeJson(PROGRESS_FILE, {
+        downloaded: currentProgress.downloaded,
+        total: currentProgress.total, // Zapisz całkowitą liczbę
+        downloadedDays: Array.from(currentProgress.downloadedDays),
+        isCountingComplete: currentProgress.isCountingComplete || false // Zapisz stan zliczania
+      }, { spaces: 2 });
+      return; // Sukces
+    } catch (error) {
+      console.error(`Błąd przy zapisywaniu postępu (próba ${attempt}/${retries}):`, error);
+      if (attempt < retries) {
+        // Czekaj przed następną próbą
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      } else {
+        // Ostatnia próba - loguj błąd ale nie przerywaj pobierania
+        console.error('Nie udało się zapisać postępu po wszystkich próbach');
+      }
+    }
   }
 }
 
-// Pobieranie HTML strony
-async function fetchHTML(url) {
+// Pobieranie HTML strony z limitem przekierowań i rozmiaru
+async function fetchHTML(url, redirectCount = 0, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
+    // Zapobieganie nieskończonym przekierowaniom
+    if (redirectCount > maxRedirects) {
+      return reject(new Error(`Zbyt wiele przekierowań (max ${maxRedirects}) dla ${url}`));
+    }
+
     const urlObj = new URL(url);
     const protocol = urlObj.protocol === 'https:' ? https : http;
     
@@ -112,25 +128,56 @@ async function fetchHTML(url) {
       timeout: 30000
     };
 
+    const MAX_HTML_SIZE = 10 * 1024 * 1024; // 10 MB limit dla HTML
+    let data = '';
+    let dataSize = 0;
+
     const req = protocol.request(options, (res) => {
       // Obsługa przekierowań
       if (res.statusCode === 301 || res.statusCode === 302) {
-        return fetchHTML(res.headers.location)
-          .then(resolve)
-          .catch(reject);
+        const location = res.headers.location;
+        if (!location) {
+          return reject(new Error(`Brak lokalizacji w przekierowaniu dla ${url}`));
+        }
+        // Walidacja URL przekierowania
+        try {
+          const redirectUrl = new URL(location, url);
+          return fetchHTML(redirectUrl.toString(), redirectCount + 1, maxRedirects)
+            .then(resolve)
+            .catch(reject);
+        } catch (urlError) {
+          return reject(new Error(`Nieprawidłowy URL przekierowania: ${location}`));
+        }
       }
 
       if (res.statusCode !== 200) {
         return reject(new Error(`HTTP ${res.statusCode} dla ${url}`));
       }
 
-      let data = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => {
+        dataSize += chunk.length;
+        // Zapobieganie problemom z pamięcią - limit rozmiaru
+        if (dataSize > MAX_HTML_SIZE) {
+          req.destroy();
+          return reject(new Error(`Rozmiar HTML przekracza limit (${MAX_HTML_SIZE/1024/1024} MB) dla ${url}`));
+        }
         data += chunk;
       });
+      
       res.on('end', () => {
         resolve(data);
+      });
+
+      // Obsługa przerwanych połączeń
+      res.on('close', () => {
+        if (!res.complete) {
+          reject(new Error(`Połączenie przerwane dla ${url}`));
+        }
+      });
+
+      res.on('aborted', () => {
+        reject(new Error(`Połączenie przerwane (aborted) dla ${url}`));
       });
     });
 
@@ -636,9 +683,14 @@ async function checkImageReady(imageUrl, maxWaitTime = 120000, mainWindow = null
   return true;
 }
 
-// Pobieranie rozmiaru obrazu przez HEAD request
-async function getImageSize(imageUrl) {
+// Pobieranie rozmiaru obrazu przez HEAD request z limitem przekierowań
+async function getImageSize(imageUrl, redirectCount = 0, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
+    // Zapobieganie nieskończonym przekierowaniom
+    if (redirectCount > maxRedirects) {
+      return reject(new Error(`Zbyt wiele przekierowań (max ${maxRedirects}) dla ${imageUrl}`));
+    }
+
     const urlObj = new URL(imageUrl);
     const protocol = urlObj.protocol === 'https:' ? https : http;
     
@@ -655,10 +707,19 @@ async function getImageSize(imageUrl) {
 
     const req = protocol.request(options, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        // Przekierowanie - spróbuj ponownie z nowym URL
-        return getImageSize(res.headers.location)
-          .then(resolve)
-          .catch(reject);
+        const location = res.headers.location;
+        if (!location) {
+          return reject(new Error(`Brak lokalizacji w przekierowaniu dla ${imageUrl}`));
+        }
+        // Walidacja URL przekierowania
+        try {
+          const redirectUrl = new URL(location, imageUrl);
+          return getImageSize(redirectUrl.toString(), redirectCount + 1, maxRedirects)
+            .then(resolve)
+            .catch(reject);
+        } catch (urlError) {
+          return reject(new Error(`Nieprawidłowy URL przekierowania: ${location}`));
+        }
       }
       
       if (res.statusCode !== 200) {
@@ -684,47 +745,169 @@ async function getImageSize(imageUrl) {
   });
 }
 
-// Pobieranie zdjęcia
-async function downloadImage(imageUrl, savePath) {
-  return new Promise((resolve, reject) => {
-    const protocol = imageUrl.startsWith('https') ? https : http;
-    
-    protocol.get(imageUrl, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        // Przekierowanie
-        return downloadImage(response.headers.location, savePath)
-          .then(resolve)
-          .catch(reject);
+// Pobieranie zdjęcia z timeoutem i retry
+async function downloadImage(imageUrl, savePath, retries = 3, mainWindow = null) {
+  const DOWNLOAD_TIMEOUT = 300000; // 5 minut na obraz (dla bardzo dużych plików)
+  const RETRY_DELAY = 5000; // 5 sekund między próbami
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 1) {
+        if (mainWindow) {
+          sendLog(mainWindow, `Ponawianie pobierania (próba ${attempt}/${retries})...`, 'info');
+        }
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
       }
       
-      if (response.statusCode !== 200) {
-        return reject(new Error(`HTTP ${response.statusCode}`));
-      }
+      return await new Promise((resolve, reject) => {
+        const urlObj = new URL(imageUrl);
+        const protocol = urlObj.protocol === 'https:' ? https : http;
+        
+        const options = {
+          hostname: urlObj.hostname,
+          port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+          path: urlObj.pathname + urlObj.search,
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: DOWNLOAD_TIMEOUT
+        };
+        
+        let downloadTimeout = null;
+        const req = protocol.request(options, (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            // Przekierowanie - rekurencyjnie z mniejszą liczbą prób
+            return downloadImage(response.headers.location, savePath, retries - attempt + 1, mainWindow)
+              .then(resolve)
+              .catch(reject);
+          }
+          
+          if (response.statusCode !== 200) {
+            return reject(new Error(`HTTP ${response.statusCode}`));
+          }
 
-      const fileStream = fs.createWriteStream(savePath);
-      response.pipe(fileStream);
-      
-      fileStream.on('finish', () => {
-        fileStream.close();
-        resolve();
+          const fileStream = fs.createWriteStream(savePath);
+          let downloadedBytes = 0;
+          const contentLength = parseInt(response.headers['content-length'] || '0');
+          
+          // Funkcja do resetowania timeoutu
+          const resetTimeout = () => {
+            if (downloadTimeout) {
+              clearTimeout(downloadTimeout);
+            }
+            downloadTimeout = setTimeout(() => {
+              req.destroy();
+              fileStream.destroy();
+              fs.unlink(savePath, () => {});
+              reject(new Error(`Timeout pobierania - brak danych przez ${DOWNLOAD_TIMEOUT/1000}s`));
+            }, DOWNLOAD_TIMEOUT);
+          };
+          
+          // Ustaw początkowy timeout
+          resetTimeout();
+          
+          // Monitoruj postęp pobierania - resetuj timeout przy każdym otrzymaniu danych
+          response.on('data', (chunk) => {
+            downloadedBytes += chunk.length;
+            resetTimeout();
+          });
+          
+          // Obsługa przerwanych połączeń
+          response.on('close', () => {
+            if (!response.complete) {
+              clearTimeout(downloadTimeout);
+              fileStream.destroy();
+              fs.unlink(savePath, () => {});
+              reject(new Error('Połączenie przerwane podczas pobierania'));
+            }
+          });
+
+          response.on('aborted', () => {
+            clearTimeout(downloadTimeout);
+            fileStream.destroy();
+            fs.unlink(savePath, () => {});
+            reject(new Error('Połączenie przerwane (aborted)'));
+          });
+          
+          response.pipe(fileStream);
+          
+          fileStream.on('finish', () => {
+            clearTimeout(downloadTimeout);
+            fileStream.close();
+            if (mainWindow && contentLength > 0) {
+              sendLog(mainWindow, `Pobrano: ${(downloadedBytes/1024/1024).toFixed(2)} MB`, 'info');
+            }
+            resolve();
+          });
+          
+          fileStream.on('error', (err) => {
+            clearTimeout(downloadTimeout);
+            fs.unlink(savePath, () => {});
+            reject(err);
+          });
+        });
+        
+        req.on('error', (error) => {
+          if (downloadTimeout) {
+            clearTimeout(downloadTimeout);
+          }
+          reject(new Error(`Błąd połączenia: ${error.message}`));
+        });
+        
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error(`Timeout połączenia (${DOWNLOAD_TIMEOUT/1000}s)`));
+        });
+        
+        req.end();
       });
-      
-      fileStream.on('error', (err) => {
-        fs.unlink(savePath, () => {});
-        reject(err);
-      });
-    }).on('error', reject);
-  });
+    } catch (error) {
+      // Jeśli to ostatnia próba, rzuć błąd
+      if (attempt === retries) {
+        throw new Error(`Nie udało się pobrać po ${retries} próbach: ${error.message}`);
+      }
+      // W przeciwnym razie kontynuuj do następnej próby
+      if (mainWindow) {
+        sendLog(mainWindow, `Błąd pobierania (próba ${attempt}/${retries}): ${error.message}`, 'info');
+      }
+    }
+  }
 }
 
 // Główna funkcja pobierania
 async function startDownload(mainWindow) {
-  if (isDownloading) {
+  // Sprawdź czy już trwa pobieranie
+  if (isDownloading && downloadPromise) {
     throw new Error('Pobieranie już trwa');
+  }
+
+  // Jeśli poprzednie pobieranie się nie zakończyło poprawnie, zresetuj stan
+  if (isDownloading && !downloadPromise) {
+    console.log('Wykryto zawieszone pobieranie - resetowanie stanu...');
+    isDownloading = false;
+    shouldStop = false;
   }
 
   isDownloading = true;
   shouldStop = false;
+  
+  // Utwórz Promise dla tego pobierania
+  downloadPromise = (async () => {
+    try {
+      await startDownloadInternal(mainWindow);
+    } finally {
+      isDownloading = false;
+      shouldStop = false;
+      downloadPromise = null;
+    }
+  })();
+  
+  return downloadPromise;
+}
+
+// Wewnętrzna funkcja pobierania
+async function startDownloadInternal(mainWindow) {
 
   try {
     await initialize();
@@ -808,10 +991,14 @@ async function startDownload(mainWindow) {
         currentProgress.currentDay = dayKey;
         sendLog(mainWindow, `Pobieranie: ${dayKey}`, 'info');
 
+        // Parsowanie strony dnia (tylko raz)
+        let result = null;
+        let imageUrl = null;
+        let savePath = null;
+        
         try {
-          // Parsowanie strony dnia
           sendLog(mainWindow, `Parsowanie strony: ${dayKey} (${day.url})`, 'info');
-          const result = await parseDay(day.url, mainWindow);
+          result = await parseDay(day.url, mainWindow);
           
           if (!result || !result.imageUrl) {
             const skipReason = result?.skipReason || 'Nie znaleziono obrazu na stronie';
@@ -826,7 +1013,7 @@ async function startDownload(mainWindow) {
             continue;
           }
 
-          const imageUrl = result.imageUrl;
+          imageUrl = result.imageUrl;
           sendLog(mainWindow, `Znaleziono zdjęcie: ${imageUrl}`, 'info');
 
           // Jeśli obraz wymaga renderowania, sprawdź czy jest gotowy
@@ -840,34 +1027,110 @@ async function startDownload(mainWindow) {
           const monthDir = path.join(yearDir, day.month.toString().padStart(2, '0'));
           await fs.ensureDir(monthDir);
 
-          // Pobieranie zdjęcia
+          // Przygotuj ścieżkę zapisu
           const filename = path.basename(imageUrl.split('?')[0]); // Usuń query string jeśli jest
-          const savePath = path.join(monthDir, filename);
+          savePath = path.join(monthDir, filename);
           
-          sendLog(mainWindow, `Pobieranie do: ${savePath}`, 'info');
-          await downloadImage(imageUrl, savePath);
-          
-          // Oznacz jako pobrane
-          currentProgress.downloadedDays.add(dayKey);
-          currentProgress.downloaded++;
-          await saveProgress();
-
-          sendLog(mainWindow, `✓ Pobrano: ${dayKey}`, 'success');
-          
-          // Aktualizacja postępu
-          currentProgress.percent = (currentProgress.downloaded / currentProgress.total) * 100;
-          currentProgress.status = `${currentProgress.downloaded}/${currentProgress.total} - ${currentProgress.currentMonth}`;
-          
+          // Sprawdź czy plik już istnieje (oszczędność czasu i zasobów)
+          if (await fs.pathExists(savePath)) {
+            const stats = await fs.stat(savePath);
+            if (stats.size > 0) {
+              sendLog(mainWindow, `Plik już istnieje: ${dayKey} (${(stats.size/1024/1024).toFixed(2)} MB) - pomijam`, 'info');
+              currentProgress.downloadedDays.add(dayKey);
+              currentProgress.downloaded++;
+              await saveProgress();
+              currentProgress.percent = (currentProgress.downloaded / currentProgress.total) * 100;
+              currentProgress.status = `${currentProgress.downloaded}/${currentProgress.total} - ${currentProgress.currentMonth}`;
+              continue;
+            } else {
+              // Plik istnieje ale jest pusty - usuń i pobierz ponownie
+              await fs.remove(savePath);
+            }
+          }
         } catch (error) {
-          // Jeśli błąd 404, może to oznaczać że nie ma zdjęcia (tylko film) lub strona dnia nie istnieje
+          // Błąd przy parsowaniu - pomiń
           if (error.message.includes('404')) {
             sendLog(mainWindow, `⚠ HTTP 404 dla ${dayKey} - strona dnia nie istnieje (normalne dla niektórych dni)`, 'info');
-            // Oznacz jako przetworzone, żeby nie próbować w nieskończoność
             currentProgress.downloadedDays.add(dayKey);
             await saveProgress();
           } else {
-            sendLog(mainWindow, `✗ Błąd przy ${dayKey}: ${error.message}`, 'error');
+            sendLog(mainWindow, `✗ Błąd przy parsowaniu ${dayKey}: ${error.message}`, 'error');
+            await saveProgress();
           }
+          continue;
+        }
+
+        // Próby pobierania obrazu z retry dla timeoutów
+        const MAX_DOWNLOAD_ATTEMPTS = 5; // 5 prób dla obrazów z timeoutem
+        let downloadSuccess = false;
+        let lastError = null;
+        let progressSaveCounter = 0; // Licznik do batch saving
+
+        for (let downloadAttempt = 1; downloadAttempt <= MAX_DOWNLOAD_ATTEMPTS; downloadAttempt++) {
+          if (shouldStop) break;
+          
+          try {
+            if (downloadAttempt > 1) {
+              sendLog(mainWindow, `Ponawianie pobierania ${dayKey} (próba ${downloadAttempt}/${MAX_DOWNLOAD_ATTEMPTS})...`, 'info');
+              // Czekaj dłużej przed kolejną próbą (zwiększający się delay)
+              const retryDelay = Math.min(10000 * downloadAttempt, 30000); // Max 30 sekund
+              await new Promise(resolve => setTimeout(resolve, retryDelay));
+            } else {
+              sendLog(mainWindow, `Pobieranie do: ${savePath}`, 'info');
+            }
+            
+            await downloadImage(imageUrl, savePath, 3, mainWindow);
+            
+            // Sukces!
+            downloadSuccess = true;
+            currentProgress.downloadedDays.add(dayKey);
+            currentProgress.downloaded++;
+            progressSaveCounter++;
+            
+            // Zapisz postęp co 5 obrazów lub zawsze przy sukcesie (batch saving dla wydajności)
+            if (progressSaveCounter >= 5 || downloadAttempt === 1) {
+              await saveProgress();
+              progressSaveCounter = 0;
+            }
+            
+            sendLog(mainWindow, `✓ Pobrano: ${dayKey}`, 'success');
+            break;
+            
+          } catch (error) {
+            lastError = error;
+            
+            // Jeśli to nie timeout, nie próbuj ponownie
+            if (!error.message.includes('Timeout') && !error.message.includes('timeout')) {
+              sendLog(mainWindow, `✗ Błąd przy ${dayKey}: ${error.message}`, 'error');
+              await saveProgress(); // Zawsze zapisz przy błędzie
+              break;
+            }
+            
+            // Timeout - loguj i spróbuj ponownie
+            if (downloadAttempt < MAX_DOWNLOAD_ATTEMPTS) {
+              sendLog(mainWindow, `⏱ Timeout przy ${dayKey} (próba ${downloadAttempt}/${MAX_DOWNLOAD_ATTEMPTS}) - ponawiam...`, 'info');
+            } else {
+              sendLog(mainWindow, `⏱ Timeout przy ${dayKey} po ${MAX_DOWNLOAD_ATTEMPTS} próbach - pomijam (możesz spróbować ponownie później)`, 'error');
+            }
+            
+            // Usuń częściowo pobrany plik przed następną próbą
+            try {
+              if (await fs.pathExists(savePath)) {
+                await fs.remove(savePath);
+              }
+            } catch (unlinkError) {
+              // Ignoruj błędy usuwania
+            }
+          }
+        }
+
+        // Jeśli wszystkie próby się nie powiodły, zapisz postęp ale nie oznacz jako pobrane
+        if (!downloadSuccess) {
+          await saveProgress(); // Zawsze zapisz postęp
+        } else {
+          // Aktualizacja postępu tylko przy sukcesie
+          currentProgress.percent = (currentProgress.downloaded / currentProgress.total) * 100;
+          currentProgress.status = `${currentProgress.downloaded}/${currentProgress.total} - ${currentProgress.currentMonth}`;
         }
       }
     }
@@ -877,14 +1140,30 @@ async function startDownload(mainWindow) {
   } catch (error) {
     sendLog(mainWindow, `Błąd krytyczny: ${error.message}`, 'error');
     throw error;
-  } finally {
-    isDownloading = false;
-    shouldStop = false;
   }
 }
 
-function stopDownload() {
+async function stopDownload() {
   shouldStop = true;
+  // Poczekaj na zakończenie aktualnego pobierania (max 5 sekund)
+  if (downloadPromise) {
+    try {
+      await Promise.race([
+        downloadPromise,
+        new Promise(resolve => setTimeout(resolve, 5000))
+      ]);
+    } catch (error) {
+      // Ignoruj błędy przy zatrzymywaniu
+    }
+  }
+  return Promise.resolve();
+}
+
+// Funkcja do resetowania stanu pobierania (np. po zawieszeniu)
+function resetDownloadState() {
+  isDownloading = false;
+  shouldStop = false;
+  downloadPromise = null;
   return Promise.resolve();
 }
 
@@ -931,6 +1210,7 @@ module.exports = {
   startDownload,
   stopDownload,
   getProgress,
-  resetProgress
+  resetProgress,
+  resetDownloadState
 };
 

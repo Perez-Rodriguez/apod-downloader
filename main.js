@@ -55,6 +55,8 @@ function createWindow() {
 app.whenReady().then(() => {
   const userDataPath = app.getPath('userData');
   downloader.setPaths(userDataPath);
+  // Zresetuj stan pobierania przy starcie (na wypadek zawieszenia)
+  downloader.resetDownloadState();
   createWindow();
 });
 
@@ -77,6 +79,10 @@ ipcMain.handle('start-download', async () => {
 
 ipcMain.handle('stop-download', async () => {
   return await downloader.stopDownload();
+});
+
+ipcMain.handle('reset-download-state', async () => {
+  return await downloader.resetDownloadState();
 });
 
 ipcMain.handle('get-progress', async () => {
